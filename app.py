@@ -17,7 +17,7 @@ import decide as dec
 import gemma
 import pipeline
 import triage as tri
-from scenarios import SCENARIOS
+from scenarios import CALLS, SCENARIOS
 
 st.set_page_config(page_title="Sentinel Veil", page_icon="🛡️", layout="wide")
 
@@ -53,6 +53,9 @@ st.markdown("""
 .phone .note{margin-top:14px;border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.4;border-left:6px solid}
 .phone .note b{display:block;font-size:15px;margin-bottom:2px}
 .phone .idle{color:#777;text-align:center;margin-top:120px;font-size:14px}
+.phone .cline{background:#fff;border:1px solid #d8dbe0;border-radius:12px;padding:8px 12px;margin:6px 0;font-size:13px;line-height:1.35}
+.phone .meter{height:10px;background:#d8dbe0;border-radius:6px;margin-top:12px;overflow:hidden}
+.phone .meter div{height:10px}
 </style>
 """, unsafe_allow_html=True)
 
@@ -63,11 +66,16 @@ with st.sidebar:
 
     item = None
     if mode == "Demo scenario":
-        name = st.selectbox("Scenario", list(SCENARIOS))
-        sc = SCENARIOS[name]
-        item = {k: sc.get(k) for k in ("kind", "text", "sender_known", "banking_app_open", "remote_app_running")}
-        item.update(sender_label=sc["sender"], image=sc.get("image"), name=name, expect=sc["expect"])
-        st.caption(f"Sender: {sc['sender']}")
+        name = st.selectbox("Scenario", list(SCENARIOS) + list(CALLS))
+        if name in CALLS:
+            item = {"call": CALLS[name], "name": name}
+            st.caption(f"Simulated live call · caller: {CALLS[name]['caller']}")
+        else:
+            sc = SCENARIOS[name]
+            item = {k: sc.get(k) for k in ("kind", "text", "sender_known", "banking_app_open", "remote_app_running")}
+            item.update(sender_label=sc["sender"], image=sc.get("image"), name=name, expect=sc["expect"],
+                        ocr_fallback=sc.get("ocr_fallback"))
+            st.caption(f"Sender: {sc['sender']}")
     else:
         text = st.text_area("Message text", height=120, placeholder="Paste a message...")
         up = st.file_uploader("...or a screenshot", type=["png", "jpg", "jpeg"])
@@ -86,6 +94,11 @@ with st.sidebar:
     if ss.gemma_ok is None:
         ss.gemma_ok = gemma.is_available()
     use_real = want_real and ss.gemma_ok
+    if tri.model_available():
+        use_model = st.toggle("Use trained first-check model", value=False)
+    else:
+        use_model = False
+        st.caption("No trained first-check model yet (run train_triage.py).")
 
     run = st.button("▶ Run through Sentinel Veil", type="primary", width="stretch")
 
@@ -251,29 +264,150 @@ def prepare(it):
     img = it.get("image")
     if img is not None:
         t0 = time.perf_counter()
-        it["text"] = pipeline.ocr_image(img)
-        ocr_ms = (time.perf_counter() - t0) * 1000
+        try:
+            it["text"] = pipeline.ocr_image(img)
+            ocr_ms = (time.perf_counter() - t0) * 1000
+        except pipeline.OcrUnavailable:
+            if not it.get("ocr_fallback"):
+                raise  # an uploaded image has no pre-saved text, so show the real error
+            it["text"] = it["ocr_fallback"]
+            it["ocr_note"] = "Tesseract not found: using the pre-saved text of this demo image (NOT real OCR). See README."
         raw = open(img, "rb").read() if isinstance(img, str) else img.getvalue()
         it["image_b64"] = base64.b64encode(raw).decode()
         it["image"] = None  # keep the stored item light; the pixels live in image_b64
     return it, ocr_ms
 
 
+# ------------------------------------------------------------------ simulated live call
+RANK = {dec.ALLOW: 0, dec.DELAY: 1, dec.CHALLENGE: 2, dec.REJECT: 3}
+
+
+def call_screen_html(call, shown, d=None, gate=None):
+    head = '<div class="top"><span>📞 Call in progress</span><span>Sentinel Veil ●</span></div>'
+    who = f'<div class="sender">{html.escape(call["caller"])} · simulated live call</div>'
+    lines = "".join(f'<div class="cline">{html.escape(l)}</div>' for l in shown) or '<div class="sender">Connecting…</div>'
+    risk = d.risk if d else 0
+    color = COLORS[d.action] if d else COLORS[dec.ALLOW]
+    meter = (f'<div class="meter"><div style="width:{risk}%;background:{color}"></div></div>'
+             f'<div class="sender">Call risk {risk}/100</div>')
+    note = ""
+    if gate is not None:
+        c = COLORS[gate.action]
+        if gate.action == dec.ALLOW:
+            note = (f'<div class="note" style="border-color:{c};background:#e3f5e8"><b>✓ ALLOW · payment app opened</b>'
+                    f'{html.escape(gate.reason)}</div>')
+        else:
+            note = (f'<div class="note" style="border-color:{c};background:#ffe9db"><b>🔐 CHALLENGE · payment app frozen</b>'
+                    f'{html.escape(gate.reason)}<br><br>Confirm it is really you to continue.</div>')
+    elif d is not None:
+        c = COLORS[d.action]
+        if d.action == dec.ALLOW:
+            note = f'<div class="note" style="border-color:{c};background:#e3f5e8"><b>✓ No warning</b>Nothing suspicious so far.</div>'
+        elif d.action == dec.DELAY:
+            note = (f'<div class="note" style="border-color:{c};background:#fff4d6"><b>⚠ CAUTION</b>'
+                    f'{html.escape(d.reason)}</div>')
+        else:
+            note = (f'<div class="note" style="border-color:{c};background:#ffe9db"><b>⚠ WARNING · likely scam call</b>'
+                    f'{html.escape(d.reason)}<br><br>Do not share codes or PINs. Payments are guarded.</div>')
+    return f'<div class="phone">{head}<div class="body">{who}{lines}{meter}{note}</div></div>'
+
+
+def show_proof_call(s):
+    with proof:
+        st.divider()
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Call windows analysed", s["windows"])
+        c2.metric("Woke the AI", f"{s['ai_wakes']} of {s['windows']}")
+        c3.metric("New files written to disk", s["files"])
+        c4.metric("Payment app gate", s["gate"].action)
+        st.caption("The call audio is SIMULATED as a streaming transcript. In a real product this would come from "
+                   "OS-level access via a phone maker. Sentinel Veil never looks at the PIN screen; it acts before.")
+        with st.expander("Rule table: how the decision is made"):
+            st.table({"If…": [r for r, _ in dec.RULE_TABLE], "Then": [a for _, a in dec.RULE_TABLE]})
+
+
+def run_call(name, call):
+    ss.pop("challenge", None)
+    log = [tline("hook", f"call from '{call['caller']}' (SIMULATED stream, not real audio)")]
+    draw_terminal(log)
+    shown, worst = [], None
+    windows = ai_wakes = files = 0
+    ph_screen.markdown(call_screen_html(call, shown), unsafe_allow_html=True)
+    time.sleep(0.8)
+
+    for line in call["lines"]:
+        shown.append(line)
+        log.append(tline("asr", f'"{line}"', "dim"))
+        ph_screen.markdown(call_screen_html(call, shown, worst), unsafe_allow_html=True)
+        draw_terminal(log)
+        time.sleep(0.9)
+        if len(shown) < 2:
+            continue  # wait for a little context before analysing
+
+        window = " ".join(shown[-3:])
+        item_w = dict(kind="call", text=window, sender_known=call["sender_known"],
+                      banking_app_open=False, remote_app_running=False, use_model=use_model)
+        log.append(tline("window", f"analysing the last {min(3, len(shown))} lines", "dim"))
+
+        def live(stage, data):
+            if stage == "countdown":
+                return
+            log.extend(lines_for(stage, data, item_w))
+            draw_terminal(log)
+
+        res = pipeline.run(item_w, use_real, ttl=0.5, on_stage=live)
+        windows += 1
+        ai_wakes += 1 if res["ai"] else 0
+        files += res["files_changed"]
+        d = res["decision"]
+        if worst is None or RANK[d.action] >= RANK[worst.action]:  # a flagged call stays flagged
+            worst = d
+        ph_screen.markdown(call_screen_html(call, shown, worst), unsafe_allow_html=True)
+        time.sleep(0.4)
+
+    # the user now opens a payment app during the call (SIMULATED event)
+    time.sleep(0.8)
+    log.append(tline("event", "user opens a payment app (PhonePe / Google Pay) during the call [simulated]", "warn"))
+    gate = dec.gate_payment_app(worst)
+    log.append(tline("adrc", f"decision={gate.action}  risk={gate.risk}/100",
+                     {"ALLOW": "ok", "DELAY": "warn", "CHALLENGE": "warn", "REJECT": "bad"}[gate.action]))
+    log.append(tline("adrc", f"rule: {gate.rule}", "dim"))
+    log.append(tline("disk", f"new or changed files in project folder: {files}", "ok" if files == 0 else "bad"))
+    log.append(tline("kernel", "call analysis done, back to sleep", "dim"))
+    draw_terminal(log)
+    ph_screen.markdown(call_screen_html(call, shown, worst, gate), unsafe_allow_html=True)
+    show_challenge(gate)
+
+    stats = {"windows": windows, "ai_wakes": ai_wakes, "files": files, "gate": gate}
+    ss.last = {"mode": "call", "call": call, "shown": list(shown), "worst": worst, "gate": gate, "log": log, "stats": stats}
+    ss.stats["runs"] += windows
+    ss.stats["ai_calls"] += ai_wakes
+    ss.stats["skipped"] += windows - ai_wakes
+    draw_stats()
+    show_proof_call(stats)
+
+
 # ------------------------------------------------------------------ run / replay
-if run:
+if run and "call" in item:
+    run_call(item["name"], item["call"])
+
+elif run:
     ss.pop("challenge", None)
     try:
         it, ocr_ms = prepare(item)
     except Exception as e:
-        st.error(f"OCR failed ({type(e).__name__}). Is Tesseract installed? See README.")
+        st.error(f"OCR failed ({type(e).__name__}): {e}")
         st.stop()
     if not (it["text"] or "").strip():
         st.warning("Nothing to check. Type a message or pick a scenario.")
         st.stop()
 
+    it["use_model"] = use_model
     log = [tline("hook", f"rx {it['kind']} from '{it['sender_label']}' ({len(it['text'])} chars)")]
     if ocr_ms is not None:
         log.append(tline("ocr", f"text read from screen pixels in {ocr_ms:.0f} ms (local)"))
+    if it.get("ocr_note"):
+        log.append(tline("ocr", it["ocr_note"], "warn"))
     draw_terminal(log)
     ph_screen.markdown(screen_html(it, "checking"), unsafe_allow_html=True)
     time.sleep(0.5)
@@ -304,6 +438,16 @@ if run:
     ss.stats["skipped"] += 0 if res["ai"] else 1
     draw_stats()
     show_proof(res)
+
+elif ss.last and ss.last.get("mode") == "call":
+    L = ss.last
+    log = list(L["log"])
+    if ss.get("challenge"):
+        log.append(tline("adrc", f"user response: {ss.challenge[0]}", "ok" if ss.challenge[0] == "user cancelled" else "warn"))
+    draw_terminal(log)
+    ph_screen.markdown(call_screen_html(L["call"], L["shown"], L["worst"], L["gate"]), unsafe_allow_html=True)
+    show_challenge(L["gate"])
+    show_proof_call(L["stats"])
 
 elif ss.last:
     # a button on the page was pressed: redraw the last result without re-running it

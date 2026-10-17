@@ -16,3 +16,6 @@ Thumbs.db
 .env
 *.key
 data/kaggle/
+
+# Trained model file: a pickle. Only load models you trained yourself.
+data/triage_model.joblib

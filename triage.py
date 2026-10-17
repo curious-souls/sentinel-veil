@@ -4,6 +4,7 @@ triage.py - the cheap first check.
 Looks at the content AND the situation, adds up points, and says whether the
 smart AI (Gemma) is needed. No AI, no network, runs in microseconds.
 """
+import os
 import re
 from dataclasses import dataclass
 
@@ -58,8 +59,35 @@ class TriageResult:
     sensitive: bool  # content touches money or credentials
 
 
+# ---- optional trained model (made by train_triage.py) ----
+# SECURITY: the model file is a pickle. Only load a model you trained yourself.
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "triage_model.joblib")
+_cache = {"loaded": False, "obj": None}
+
+
+def _model():
+    if not _cache["loaded"]:
+        _cache["loaded"] = True
+        try:
+            if os.path.exists(MODEL_PATH):
+                import joblib
+                _cache["obj"] = joblib.load(MODEL_PATH)
+        except Exception:
+            _cache["obj"] = None
+    return _cache["obj"]
+
+
+def model_available() -> bool:
+    return _model() is not None
+
+
+def learned_probability(text: str):
+    m = _model()
+    return None if m is None else float(m["model"].predict_proba([text])[0][1])
+
+
 def triage(text: str, sender_known: bool = True, banking_app_open: bool = False,
-           remote_app_running: bool = False) -> TriageResult:
+           remote_app_running: bool = False, use_model: bool = False) -> TriageResult:
     clues = []
     low = text.lower()
 
@@ -76,6 +104,13 @@ def triage(text: str, sender_known: bool = True, banking_app_open: bool = False,
         clues.append(Clue("Remote-access app is running", 20, "Someone may be controlling the device."))
     if banking_app_open and sensitive:
         clues.append(Clue("Banking app is open", 10, "Money is one tap away right now."))
+
+    # Optional extra clue from the small trained model.
+    if use_model:
+        p = learned_probability(text)
+        if p is not None and p >= _model()["threshold"]:
+            clues.append(Clue("Trained model: reads like a scam", round(30 * p),
+                              f"The small trained model gives this a {p:.0%} scam score."))
 
     # Reassuring clue, trusted only from a known / verified sender.
     if sender_known and PROTECTIVE.search(text):

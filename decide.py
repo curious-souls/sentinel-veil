@@ -17,9 +17,10 @@ RULE_TABLE = [
     ("AI says low risk", ALLOW),
     ("AI says medium risk, nothing sensitive", DELAY),
     ("AI says medium risk AND asks for money / codes", CHALLENGE),
-    ("AI says high risk on something on the screen (page / app)", CHALLENGE),
+    ("AI says high risk on the screen or a live call (can only be frozen, not dropped)", CHALLENGE),
     ("AI says high risk on a message AND blended risk below 80", CHALLENGE),
     ("AI says high risk on a message AND blended risk 80 or more", REJECT),
+    ("Payment app opened during a call that was flagged risky", CHALLENGE),
 ]
 
 
@@ -32,7 +33,7 @@ class Decision:
 
 
 def decide(triage_score: int, sensitive: bool, kind: str, ai) -> Decision:
-    """kind is 'message' (can be dropped) or 'screen' (can only be frozen)."""
+    """kind is 'message' (can be dropped) or 'screen' / 'call' (can only be frozen or warned)."""
     if ai is None:
         return Decision(ALLOW, triage_score, "No risky clues were found, so it passed straight through.",
                         RULE_TABLE[0][0])
@@ -47,8 +48,19 @@ def decide(triage_score: int, sensitive: bool, kind: str, ai) -> Decision:
             return Decision(CHALLENGE, risk, reason, RULE_TABLE[3][0])
         return Decision(DELAY, risk, reason, RULE_TABLE[2][0])
     # high
-    if kind == "screen":
+    if kind in ("screen", "call"):
         return Decision(CHALLENGE, risk, reason, RULE_TABLE[4][0])
     if risk >= REJECT_RISK:
         return Decision(REJECT, risk, reason, RULE_TABLE[6][0])
     return Decision(CHALLENGE, risk, reason, RULE_TABLE[5][0])
+
+
+def gate_payment_app(call_decision: "Decision") -> "Decision":
+    """The user opens a payment app (PhonePe, Google Pay...) while a call is in progress.
+    If the call has been flagged as risky, freeze the app until the user confirms.
+    Sentinel Veil never looks at the PIN screen; it acts before the user gets there."""
+    if call_decision.action in (CHALLENGE, REJECT, DELAY):
+        return Decision(CHALLENGE, call_decision.risk,
+                        "You opened a payment app during a call that looks like a scam.", RULE_TABLE[7][0])
+    return Decision(ALLOW, call_decision.risk, "The call looks normal, so the payment app opened as usual.",
+                    RULE_TABLE[0][0])

@@ -41,9 +41,28 @@ stand-in results as Gemma results.
 | `buffer.py` | RAM-only buffer, zero-overwrite wipe, disk-write check |
 | `gemma.py` | calls local Gemma via Ollama; stand-in when unavailable |
 | `pipeline.py` | runs one item through all the steps |
-| `scenarios.py` | the 7 demo scenarios |
+| `scenarios.py` | 7 message/screen scenarios + 2 simulated live calls |
 | `app.py` | Streamlit screen |
-| `benchmark.py` + `data/tests.csv` | 59 hand-written examples (English + Hinglish) |
+| `benchmark.py` + `data/tests.csv` | 59 hand-written examples (English + Hinglish). The final exam: never train on it |
+| `train_triage.py` + `data/extra_train.csv` | trains the small first-check model on Kaggle + your own examples (optional) |
+
+## Simulated live calls
+
+Scenarios 8 and 9 stream a call transcript line by line, as if live speech-to-text were running. Every few
+seconds the last 3 lines are analysed through the same cascade, a risk meter rises, a warning appears mid-call,
+and when the user opens a payment app the system freezes it. The audio is **simulated**: a real product would
+get call audio from OS-level access (phone maker / OS vendor).
+
+## Optional: train the small first-check model
+
+```bash
+python train_triage.py                                   # your own examples only (smoke test)
+python train_triage.py --data spam.csv --text-col v2 --label-col v1 --scam-values spam --encoding latin-1
+python benchmark.py --learned                            # benchmark with the trained model switched on
+```
+The model trains on 80% of (Kaggle + `data/extra_train.csv`). 20% is held out for measuring, and `data/tests.csv`
+is the final exam that is never trained on. The saved model is a pickle: only load a model you trained yourself.
+It is git-ignored on purpose. Add more of your own Indian and Hinglish examples to `data/extra_train.csv`.
 
 ## Known limits (say these out loud in the pitch)
 

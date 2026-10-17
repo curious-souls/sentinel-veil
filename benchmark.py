@@ -33,14 +33,17 @@ def flagged(action):  # anything other than ALLOW counts as "we reacted"
     return action != dec.ALLOW
 
 
-def evaluate(rows, mode, use_real):
+def evaluate(rows, mode, use_real, use_model=False):
     """mode: 'cascade' or 'always'."""
     tp = fn = fp = tn = ai_calls = 0
     ai_time = 0.0
     misses = []
-    for r in rows:
+    t_start = time.perf_counter()
+    for i, r in enumerate(rows, 1):
+        if use_real:  # live progress counter (the first call is slow while the model loads)
+            print(f"\r  [{mode}] {i}/{len(rows)}  elapsed {time.perf_counter() - t_start:.0f}s   ", end="", flush=True)
         known, bank, remote = r["sender_known"] == "1", r["banking_app_open"] == "1", r["remote_app_running"] == "1"
-        t = tri.triage(r["text"], known, bank, remote)
+        t = tri.triage(r["text"], known, bank, remote, use_model)
         ai = None
         if mode == "always" or t.needs_ai:
             ai = gemma.analyze(r["text"], known, "message", t.score,
@@ -54,6 +57,8 @@ def evaluate(rows, mode, use_real):
         elif bad: fn += 1; misses.append((r["text"], t.score, d.action))
         elif hit: fp += 1
         else: tn += 1
+    if use_real:
+        print(f"\r  [{mode}] {len(rows)}/{len(rows)}  done in {time.perf_counter() - t_start:.0f}s            ")
     n = len(rows)
     return {"n": n, "scams_caught": tp, "scams_missed": fn, "safe_wrongly_flagged": fp, "safe_ok": tn,
             "accuracy": (tp + tn) / n, "ai_calls": ai_calls, "ai_share": ai_calls / n,
@@ -63,13 +68,17 @@ def evaluate(rows, mode, use_real):
 def main():
     rows = load()
     use_real = ("--no-ai" not in sys.argv) and gemma.is_available()
+    use_model = ("--learned" in sys.argv) and tri.model_available()
+    if "--learned" in sys.argv and not use_model:
+        print("--learned given but no trained model found. Run train_triage.py first. Continuing without it.")
+    print("Trained first-check model:", "ON" if use_model else "off")
     scams = [r for r in rows if r["label"] == "scam"]
     safe = [r for r in rows if r["label"] == "safe"]
     print(f"Test set: {len(rows)} items ({len(scams)} scams, {len(safe)} safe)")
 
     # Triage-only facts (no AI needed)
     reach = lambda group: sum(tri.triage(r["text"], r["sender_known"] == "1", r["banking_app_open"] == "1",
-                                         r["remote_app_running"] == "1").needs_ai for r in group)
+                                         r["remote_app_running"] == "1", use_model).needs_ai for r in group)
     s_reach, f_reach = reach(scams), reach(safe)
     print("\n-- First check (triage) alone --")
     print(f"Skipped the AI:                {len(rows) - s_reach - f_reach}/{len(rows)} ({(len(rows) - s_reach - f_reach) / len(rows):.0%})")
@@ -80,17 +89,18 @@ def main():
     if not use_real:
         print("\nGemma is not running (or --no-ai), so cascade-vs-always-AI is NOT reported.")
         print("Start Ollama, pull a Gemma model, and run again for the full comparison.")
-        c = evaluate(rows, "cascade", False)
+        c = evaluate(rows, "cascade", False, use_model)
         print("\nWorst misses (stand-in mode):")
         for text, score, action in c["misses"][:8]:
             print(f"  score={score:3} {action:6} {text[:90]}")
         return
 
     print(f"\n-- Real Gemma ({gemma.MODEL}) --")
+    print("Running 2 passes (Gemma on everything, then the cascade). Expect a few minutes; the first call is slowest.")
     results = {}
     for mode in ("always", "cascade"):
         t0 = time.perf_counter()
-        results[mode] = evaluate(rows, mode, True)
+        results[mode] = evaluate(rows, mode, True, use_model)
         results[mode]["wall"] = time.perf_counter() - t0
     for mode, r in results.items():
         label = "Gemma on everything" if mode == "always" else "Cascade (ours)"

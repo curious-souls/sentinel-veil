@@ -13,10 +13,39 @@ import triage as tri
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
+class OcrUnavailable(RuntimeError):
+    """Tesseract could not be found on this computer."""
+
+
+def _find_tesseract():
+    """Look on PATH, then in the places Windows installers put it. SENTINEL_TESSERACT overrides."""
+    import shutil
+    candidates = []
+    if os.environ.get("SENTINEL_TESSERACT"):
+        candidates.append(os.environ["SENTINEL_TESSERACT"])
+    on_path = shutil.which("tesseract")
+    if on_path:
+        candidates.append(on_path)
+    if os.name == "nt":
+        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"),
+                     os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+            if base:
+                candidates.append(os.path.join(base, "Tesseract-OCR", "tesseract.exe"))
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
 def ocr_image(path_or_file) -> str:
     """Local OCR (Tesseract). Nothing is sent anywhere."""
     from PIL import Image
     import pytesseract
+    exe = _find_tesseract()
+    if exe is None:
+        raise OcrUnavailable("Tesseract was not found. Install it (winget install --id UB-Mannheim.TesseractOCR -e), "
+                             "restart VS Code, or set SENTINEL_TESSERACT to the path of tesseract.exe.")
+    pytesseract.pytesseract.tesseract_cmd = exe
     img = Image.open(path_or_file)
     return pytesseract.image_to_string(img).strip()
 
@@ -39,7 +68,8 @@ def run(item: dict, use_real_ai: bool, ttl: float = 5.0, on_stage=None, wait_for
     # 1. cheap first check
     t0 = time.perf_counter()
     tr = tri.triage(item["text"], item.get("sender_known", True),
-                    item.get("banking_app_open", False), item.get("remote_app_running", False))
+                    item.get("banking_app_open", False), item.get("remote_app_running", False),
+                    item.get("use_model", False))
     res["timings"]["triage_ms"] = (time.perf_counter() - t0) * 1000
     res["triage"] = tr
     stage("triage", tr)

@@ -2,3 +2,5 @@ streamlit>=1.40
 requests
 pillow
 pytesseract
+scikit-learn
+joblib
