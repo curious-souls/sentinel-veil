@@ -1,0 +1,13 @@
+import streamlit as st
+import pytesseract
+import shutil
+
+# Force pytesseract to locate the correct Linux binary path
+pytesseract.pytesseract.tesseract_cmd = None
+
+# Automatically fetch the installed path from the Linux environment
+if shutil.which("tesseract"):
+    pytesseract.pytesseract.tesseract_cmd = shutil.which("tesseract")
+else:
+    # Standard fallback path for Debian/Ubuntu environments on Streamlit Cloud
+    pytesseract.pytesseract.tesseract_cmd = r"/usr/bin/tesseract"
